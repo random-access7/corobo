@@ -1,0 +1,11 @@
+[Core]
+Name = no_sir
+Module = no_sir
+
+[Documentation]
+description = Request users to refrain from using 'sir'
+
+[Python]
+version = 3
+
+[Errbot]
