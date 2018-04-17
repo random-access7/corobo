@@ -381,3 +381,87 @@ class LabHub(BotPlugin):
                     state=type(self).community_state(pr_count)
                  )
         yield reply
+
+    @re_botcmd(pattern=r'^migrate\s+https://(github|gitlab)\.com/([^/]+)/([^/]+)/+issues/(\d+)\s+https://(github|gitlab)\.com/([^/]+)/([^/]+)/*$',  # Ignore LineLengthBear, PyCodeStyleBear
+               # Ignore LineLengthBear, PyCodeStyleBear
+               re_cmd_name_help='migrate <complete-source-issue-URL> <complete-target-repo-URL>',
+               flags=re.IGNORECASE)
+    def migrate_issue(self, msg, match):
+        """
+        Migrate an issue from source repo
+        to target repo owned by the org
+        """
+        source_host = match.group(1)
+        source_org = match.group(2)
+        source_repo = match.group(3)
+        issue_number = match.group(4)
+        target_host = match.group(5)
+        target_org = match.group(6)
+        target_repo = match.group(7)
+
+        user = msg.frm.nick
+
+        if source_org != self.GH_ORG_NAME and source_org != self.GL_ORG_NAME:
+            return 'Source repository not owned by our org.'
+
+        if target_org != self.GH_ORG_NAME and target_org != self.GL_ORG_NAME:
+            return 'Target repository not owned by our org.'
+
+        if source_repo not in self.REPOS:
+            return 'Source repository does not exist.'
+
+        if target_repo not in self.REPOS:
+            return 'Target repository does not exist.'
+
+        if not self.TEAMS[self.GH_ORG_NAME + ' maintainers'].is_member(user):
+            return tenv().get_template(
+                'labhub/errors/not-maintainer.jinja2.md'
+            ).render(
+                action='migrate issues',
+                target=user,
+            )
+
+        try:
+            source_issue = self.REPOS[source_repo].get_issue(int(issue_number))
+            source_labels = source_issue.labels
+
+        except RuntimeError as err:
+            sterr, errno = err.args
+            if errno == 404:
+                return 'Issue does not exist!'
+            else:
+                raise RuntimeError(sterr, errno)
+
+        if str(source_issue.state) != 'open':
+            return 'Issue must be open in order to be migrated!'
+
+        source_url = 'https://{}.com/{}/{}/issues/{}'.format(
+            source_host, source_org, source_repo, issue_number)
+
+        ext_msg = ('\n\nThis is a migrated issue originally opened by @{} as {}'
+                   ' and was migrated by @{}')
+        target_issue_desc = source_issue.description.rstrip() + ext_msg.format(
+            source_issue.author.username, source_url, str(user))
+        target_issue = self.REPOS[target_repo].create_issue(
+            source_issue.title, target_issue_desc)
+        target_issue.labels = source_labels
+
+        comment_ext = '\n\nOriginally commented by @{} on {} UTC'
+
+        for comment in source_issue.comments:
+            target_comm = comment.body.rstrip() + comment_ext.format(
+                comment.author.username, str(comment.updated))
+            target_issue.add_comment(target_comm)
+
+        target_url = 'https://{}.com/{}/{}/issues/{}'.format(
+            target_host, target_org, target_repo, target_issue.number)
+
+        migrate_comm = 'Issue has been migrated to this [repository]({}) by @{}'
+        source_issue.add_comment(migrate_comm.format(
+            target_url, str(user)))
+
+        source_labels.add('Invalid')
+        source_issue.labels = source_labels
+        source_issue.close()
+
+        return 'Issue has been successfully migrated: {}'.format(target_url)
