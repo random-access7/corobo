@@ -344,3 +344,111 @@ class TestLabHub(unittest.TestCase):
                               'Command \"hey\" / \"hey there\" not found.')
         with self.assertRaises(queue.Empty):
              testbot.pop_message()
+
+    def test_migrate_issue(self):
+        plugins.labhub.GitHub = create_autospec(IGitt.GitHub.GitHub.GitHub)
+        plugins.labhub.GitLab = create_autospec(IGitt.GitLab.GitLab.GitLab)
+        labhub, testbot = plugin_testbot(plugins.labhub.LabHub, logging.ERROR)
+        labhub.activate()
+
+        labhub.REPOS = {
+            'a': self.mock_repo,
+            'b': self.mock_repo
+        }
+
+        mock_maint_team = create_autospec(github3.orgs.Team)
+        mock_maint_team.is_member.return_value = False
+
+        labhub.TEAMS = {
+            'coala maintainers': mock_maint_team,
+            'coala developers': self.mock_team,
+            'coala newcomers': self.mock_team
+        }
+        cmd = '!migrate https://github.com/{}/{}/issues/{} https://github.com/{}/{}/'
+        issue_check = 'Issue desc\n\nThis is a migrated issue originally opened by @{} as {} and was migrated by @{}'
+        comment_check = 'Comment body\n\nOriginally commented by @{} on {} UTC'
+
+        # Not a maintainer
+        testbot.assertCommand(cmd.format('coala', 'a', '21', 'coala', 'b'),
+                              'you are not a maintainer!')
+        # Unknown first org
+        testbot.assertCommand(cmd.format('coa', 'a', '23', 'coala', 'b'),
+                              'Source repository not owned by our org')
+        # Unknown second org
+        testbot.assertCommand(cmd.format('coala', 'a', '23', 'coa', 'b'),
+                              'Target repository not owned by our org')
+        # Repo does not exist
+        testbot.assertCommand(cmd.format('coala', 'c', '23', 'coala', 'b'),
+                              'Source repository does not exist')
+        # Repo does not exist
+        testbot.assertCommand(cmd.format('coala', 'a', '23', 'coala', 'e'),
+                              'Target repository does not exist')
+        # No issue exists
+        mock_maint_team.is_member.return_value = True
+        self.mock_repo.get_issue = Mock(side_effect=RuntimeError('Error message', 404))
+        testbot.assertCommand(cmd.format('coala', 'a', '21', 'coala', 'b'),
+                              'Issue does not exist!')
+        # Runtime error
+        mock_maint_team.is_member.return_value = True
+        self.mock_repo.get_issue = Mock(side_effect=RuntimeError('Error message', 403))
+        testbot.assertCommand(cmd.format('coala', 'a', '21', 'coala', 'b'),
+                              'Computer says')
+        # Issue closed
+        mock_maint_team.is_member.return_value = True
+        mock_issue = create_autospec(IGitt.GitHub.GitHub.GitHubIssue)
+        self.mock_repo.get_issue = Mock(return_value=mock_issue)
+        mock_issue.labels = PropertyMock()
+        mock_issue.state = PropertyMock()
+        mock_issue.state = 'closed'
+        testbot.assertCommand(cmd.format('coala', 'a', '21', 'coala', 'b'),
+                              'Issue must be open')
+        # Migrate issue
+        mock_maint_team.is_member.return_value = True
+        mock_issue = create_autospec(IGitt.GitHub.GitHub.GitHubIssue)
+        mock_issue2 = create_autospec(IGitt.GitHub.GitHub.GitHubIssue)
+
+        self.mock_repo.get_issue = Mock(return_value=mock_issue)
+        label_prop = PropertyMock(return_value=set())
+        type(mock_issue).labels = label_prop
+        mock_issue.title = PropertyMock()
+        mock_issue.title = 'Issue title'
+        mock_issue.description = PropertyMock()
+        mock_issue.description = 'Issue desc'
+        mock_issue.state = PropertyMock()
+        mock_issue.state = 'open'
+        mock_issue.author.username = PropertyMock()
+        mock_issue.author.username = 'random-access7'
+
+        self.mock_repo.create_issue = Mock(return_value=mock_issue2)
+        mock_issue2.labels = PropertyMock()
+        mock_issue2.number = PropertyMock()
+        mock_issue2.number = 45
+
+        mock_comment = create_autospec(IGitt.GitHub.GitHub.GitHubComment)
+        mock_comment2 = create_autospec(IGitt.GitHub.GitHub.GitHubComment)
+
+        mock_issue.comments = PropertyMock()
+        mock_issue.comments = list()
+        mock_issue.comments.append(mock_comment)
+        mock_comment.author.username = PropertyMock()
+        mock_comment.author.username = 'random-access7'
+        mock_comment.body = PropertyMock()
+        mock_comment.body = 'Comment body'
+        mock_comment.updated = PropertyMock()
+        mock_comment.updated = '07/04/2018'
+
+        testbot.assertCommand(cmd.format('coala', 'a', '21', 'coala', 'b'),
+                              'successfully migrated:')
+
+        self.mock_repo.get_issue.assert_called_with(21)
+
+        self.mock_repo.create_issue.assert_called_with('Issue title',
+        issue_check.format('random-access7', 'https://github.com/coala/a/issues/21', 'None'))
+
+        mock_issue2.add_comment.assert_called_with(comment_check.format('random-access7',
+        '07/04/2018'))
+
+        mock_issue.add_comment.assert_called_with(
+        'Issue has been migrated to this [repository](https://github.com/coala/b/issues/45) by @None')
+
+        mock_issue.close.assert_called_with()
